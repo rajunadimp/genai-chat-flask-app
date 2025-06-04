@@ -1,4 +1,6 @@
 import os
+import time
+
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -152,8 +154,8 @@ def chat_endpoint():
                 for chunk in rag_chain_instance_global.stream(user_query):
                     if chunk:  # Ensure chunk is not empty
                         sse_formatted_chunk = f"data: {json.dumps({'token': chunk})}\n\n"
-                        time.sleep(1)
                         yield sse_formatted_chunk
+                        time.sleep(1)
                 # Optionally, send a special "end-of-stream" event if your client needs it
                 # yield f"event: end-stream\ndata: {{}}\n\n"
             except RateLimitError as rle_stream:
