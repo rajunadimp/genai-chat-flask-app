@@ -177,8 +177,12 @@ def chat_endpoint():
         user_query = data['query']
         logger.info(f"Received query for streaming: {user_query}")
 
-        session_id = data['session_id']
-        logger.info(f"Received session id: {session_id}")
+        if 'session_id' not in data:
+            logger.warning("session_id field missing. Using default session id: 1234")
+            session_id = "1234"
+        else:
+            session_id = data['session_id']
+            logger.info(f"Received session id: {session_id}")
 
         conversational_rag_chain = RunnableWithMessageHistory(
             rag_chain_instance_global,
