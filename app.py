@@ -155,7 +155,7 @@ def chat_endpoint():
                     if chunk:  # Ensure chunk is not empty
                         sse_formatted_chunk = f"data: {json.dumps({'token': chunk})}\n\n"
                         yield sse_formatted_chunk
-                        time.sleep(1)
+                        time.sleep(0.1)
                 # Optionally, send a special "end-of-stream" event if your client needs it
                 # yield f"event: end-stream\ndata: {{}}\n\n"
             except RateLimitError as rle_stream:
