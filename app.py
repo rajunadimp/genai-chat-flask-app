@@ -9,6 +9,12 @@ from langchain_community.vectorstores.azuresearch import AzureSearch
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from openai import RateLimitError
 import logging
 import json
@@ -37,6 +43,15 @@ AZURE_OPENAI_API_VERSION_CHAT = os.getenv("AZURE_OPENAI_API_VERSION_CHAT")
 AZURE_AI_SEARCH_ENDPOINT = os.getenv("AZURE_AI_SEARCH_ENDPOINT")
 AZURE_AI_SEARCH_API_KEY = os.getenv("AZURE_AI_SEARCH_API_KEY")
 AZURE_AI_SEARCH_INDEX_NAME = os.getenv("AZURE_AI_SEARCH_INDEX_NAME")
+
+### Statefully manage chat history ###
+store = {}
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    if session_id not in store:
+        store[session_id] = ChatMessageHistory()
+    logger.info(f"session history: {store[session_id]}")
+    return store[session_id]
 
 
 def create_rag_chain():
@@ -79,15 +94,32 @@ def create_rag_chain():
         )
         retriever = vector_store.as_retriever(search_type="hybrid")
 
-        template = """You are an expert AI assistant for our application. Your goal is to be insightful and proactive.
+        ### Contextualize question ###
+        contextualize_q_system_prompt = """Given a chat history and the latest user question \
+        which might reference context in the chat history, formulate a standalone question \
+        which can be understood without the chat history. Do NOT answer the question, \
+        just reformulate it if needed and otherwise return it as is."""
+        contextualize_q_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", contextualize_q_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+
+        history_aware_retriever = create_history_aware_retriever(
+            llm, retriever, contextualize_q_prompt
+        )
+
+
+        ### Answer question ###
+        qa_system_prompt = """You are an expert AI assistant for our application. Your goal is to be insightful and proactive.
         Answer the question based on the following context.
         If the context is empty or doesn't contain the answer, clearly state that you don't have enough information from the provided documents to answer.
         Do not use any external information. Be concise in your primary answer.
 
         Context:
         {context}
-
-        Question: {question}
 
         ---
         Primary Answer:
@@ -100,21 +132,17 @@ def create_rag_chain():
         2. If the context discusses an issue or a process, what are the key implications or next logical steps?
         (If no specific predictive insights are apparent from this context, state "No specific predictive insights or next steps apparent from this context.")
         """
-        prompt = ChatPromptTemplate.from_template(template)
-
-        def format_docs(docs):
-            if not docs:
-                return "No relevant context found in the documents."
-            return "\n\n".join(
-                f"Source: {doc.metadata.get('source', 'Unknown')}\nContent: {doc.page_content}" for doc in docs)
-
-        rag_chain = (
-                {"context": retriever | format_docs, "question": RunnablePassthrough()}
-                | prompt
-                | llm
-                | StrOutputParser()  # This ensures chunks are strings
+        qa_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", qa_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
         )
-        logger.info("RAG chain initialized successfully.")
+        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
         return rag_chain
     except Exception as e:
         logger.error(f"Failed to initialize RAG chain: {e}", exc_info=True)
@@ -149,9 +177,24 @@ def chat_endpoint():
         user_query = data['query']
         logger.info(f"Received query for streaming: {user_query}")
 
+        session_id = data['session_id']
+        logger.info(f"Received session id: {session_id}")
+
+        conversational_rag_chain = RunnableWithMessageHistory(
+            rag_chain_instance_global,
+            get_session_history,
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
+
         def generate_stream():
             try:
-                for chunk in rag_chain_instance_global.stream(user_query):
+                streamiterator = conversational_rag_chain.stream({"input": user_query},
+                    config={"configurable": {"session_id": session_id}
+                    }
+                )
+                for chunk in streamiterator:
                     if chunk:  # Ensure chunk is not empty
                         sse_formatted_chunk = f"data: {json.dumps({'token': chunk})}\n\n"
                         yield sse_formatted_chunk
