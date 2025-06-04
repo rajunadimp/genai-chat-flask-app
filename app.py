@@ -152,6 +152,7 @@ def chat_endpoint():
                 for chunk in rag_chain_instance_global.stream(user_query):
                     if chunk:  # Ensure chunk is not empty
                         sse_formatted_chunk = f"data: {json.dumps({'token': chunk})}\n\n"
+                        time.sleep(1)
                         yield sse_formatted_chunk
                 # Optionally, send a special "end-of-stream" event if your client needs it
                 # yield f"event: end-stream\ndata: {{}}\n\n"
